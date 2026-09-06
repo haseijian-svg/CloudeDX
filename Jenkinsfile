@@ -19,6 +19,19 @@
 // 한 이미지에 uv·buildah·helm·git 이 다 들어있지 않기 때문이다.
 def BUILD_POD = '''
 spec:
+  # 🔴 IRSA — ECR push 권한
+  #
+  #    AWS 에서는 액세스 키를 넣지 않는다. 파드가 IAM 역할로 인증한다.
+  #
+  #    ⚠️ 이 SA 는 빌드 파드가 뜨는 네임스페이스(infra)에 있어야 한다.
+  #       앱의 reverdi-batch 는 reverdi 네임스페이스라 여기서 못 쓴다.
+  #       eksctl 로 따로 만든다 — aws/scripts/95-jenkins-irsa.sh 참조.
+  #
+  #    ⚠️ 로컬(Vagrant)에는 이 SA 가 없다. 그러면 파드가 안 뜬다.
+  #       로컬에서 돌릴 때는 이 줄을 지우거나 SA 를 만들어야 한다:
+  #         kubectl create sa jenkins-ecr -n infra
+  serviceAccountName: jenkins-ecr
+
   # 🔴 배치 노드에서 빌드한다. 웹 노드의 자원을 쓰면 서비스 응답이 흔들린다.
   nodeSelector:
     workload: batch
@@ -68,7 +81,8 @@ spec:
 
     # --- helm / git ------------------------------------------------------
     - name: tools
-      # ⚠️ Alpine 기반이라 git 이 기본 포함되지 않는다.
+      # ⚠️ Alpine 기반이라 git·aws CLI 가 기본 포함되지 않는다.
+      #    AWS 모드에서는 ECR 로그인 토큰을 받아야 해서 aws CLI 가 필요하다.
       #    아래 stage 에서 apk add 로 설치한다.
       #    ENTRYPOINT 가 helm 이므로 command 로 덮어써야 sh 가 돈다.
       image: alpine/helm:3.16.3
@@ -86,6 +100,16 @@ pipeline {
         }
     }
 
+    parameters {
+        // 기본값은 AWS. 로컬에서 돌리려면 빌드할 때 바꾼다.
+        string(name: 'REGISTRY',
+               defaultValue: '611669940814.dkr.ecr.ap-northeast-2.amazonaws.com',
+               description: '이미지 레지스트리 (로컬: 192.168.56.15:30500)')
+        choice(name: 'VALUES_FILE',
+               choices: ['values-aws.yaml', 'values-vagrant.yaml'],
+               description: '어느 환경의 값 파일에 태그를 커밋할지')
+    }
+
     options {
         disableConcurrentBuilds()
         timeout(time: 60, unit: 'MINUTES')
@@ -93,11 +117,19 @@ pipeline {
 
     environment {
         // 🔴 문서 0-C IP 대역표와 일치해야 한다. AWS 에서는 ECR 주소로 교체.
-        REGISTRY    = '192.168.56.15:30500'
+        // 🔴 배포 대상에 따라 달라지는 값
+        //
+        //    로컬  REGISTRY=192.168.56.15:30500      · VALUES_FILE=values-vagrant.yaml
+        //    AWS   REGISTRY=<계정>.dkr.ecr...        · VALUES_FILE=values-aws.yaml
+        //
+        //    Jenkins 잡 설정에서 파라미터로 넘기거나, 아래 기본값을 바꾼다.
+        //    (Jenkins 관리 → 잡 → 이 빌드는 매개변수가 있습니다)
+        REGISTRY    = "${params.REGISTRY}"
         // 🔴 배포 저장소. 앱 소스(CloudeDX)와 다른 곳이어야 한다.
         GITOPS_REPO = 'github.com/jpnjb0918-glitch/reverdi.git'
         CHART_PATH  = 'charts/reverdi'
-        VALUES_FILE = 'values-vagrant.yaml'   // AWS 에서는 values-aws.yaml
+        VALUES_FILE = "${params.VALUES_FILE}"
+        AWS_REGION  = 'ap-northeast-2'
     }
 
     stages {
@@ -168,13 +200,35 @@ pipeline {
                     //    Kaniko 는 2025년 6월 아카이브되어 쓰지 않는다.
                     // --tls-verify=false 는 사설 레지스트리가 HTTP 이기 때문
                     //    (infra/registries.yaml 의 insecure_skip_verify 와 짝)
+                    // 🔴 ECR 은 인증이 필요하다. 로컬 레지스트리는 없었다.
+                    //
+                    //    IRSA 로 붙은 IAM 역할이 토큰을 발급받는다 — 액세스 키가 없다.
+                    //    ECR 은 HTTPS 라 --tls-verify=false 도 필요 없다.
+                    //
+                    //    레지스트리 주소에 "amazonaws.com" 이 있으면 AWS 로 판단한다.
                     sh """
                         set -e
+
+                        TLS_OPT="--tls-verify=false"
+
+                        case "${REGISTRY}" in
+                          *amazonaws.com*)
+                            echo "ECR 로그인"
+                            command -v aws >/dev/null 2>&1 || \
+                              (command -v dnf >/dev/null && dnf install -y -q awscli) || \
+                              (command -v apk >/dev/null && apk add --no-cache aws-cli) || \
+                              pip install --no-cache-dir awscli
+                            aws ecr get-login-password --region ${AWS_REGION} \
+                              | buildah login --username AWS --password-stdin ${REGISTRY}
+                            TLS_OPT=""
+                            ;;
+                        esac
+
                         buildah bud -f dockerfile.backend -t ${REGISTRY}/reverdi-backend:${IMAGE_TAG} .
                         buildah bud -f dockerfile.crawler -t ${REGISTRY}/reverdi-crawler:${IMAGE_TAG} .
 
-                        buildah push --tls-verify=false ${REGISTRY}/reverdi-backend:${IMAGE_TAG}
-                        buildah push --tls-verify=false ${REGISTRY}/reverdi-crawler:${IMAGE_TAG}
+                        buildah push \$TLS_OPT ${REGISTRY}/reverdi-backend:${IMAGE_TAG}
+                        buildah push \$TLS_OPT ${REGISTRY}/reverdi-crawler:${IMAGE_TAG}
                     """
                 }
             }
