@@ -312,7 +312,33 @@ pipeline {
                             git clone https://${GIT_USER}:${GIT_TOKEN}@${GITOPS_REPO} gitops-update
 
                             cd gitops-update/${CHART_PATH}
-                            sed -i "s|^  tag: .*|  tag: \\"${IMAGE_TAG}\\"|" ${VALUES_FILE}
+
+                            # 🔴 sed 대신 python (2026-09-06 실패 → 수정)
+                            #
+                            #    sed -i "s|^  tag: .*|  tag: ...|" 가 동작하지 않았다.
+                            #    Groovy 문자열을 지나며 따옴표가 벗겨져, 셸에서
+                            #    공백으로 쪼개지고 "s|^" 만 스크립트가 됐다.
+                            #
+                            #    더 나빴던 건 종료 코드가 0 이었다는 점이다.
+                            #    set -e 도 안 걸리고, git diff --quiet 이
+                            #    "변경 없음"으로 판정해 조용히 넘어갔다.
+                            #    로그에는 "태그 변경 없음"만 찍혔다.
+                            #
+                            #    python 은 정규식 치환 대신 문자열을 조립해
+                            #    이스케이프 문제를 없앴고, 못 찾으면 명시적으로 실패한다.
+                            python3 -c 'import pathlib,re,sys
+f,t=sys.argv[1],sys.argv[2]
+p=pathlib.Path(f); s=p.read_text(encoding="utf-8")
+out=[]; n=0
+for line in s.split("\n"):
+    m=re.match(r"^(\s*)tag: ", line)
+    if m:
+        out.append(m.group(1)+"tag: \"%s\"" % t); n+=1
+    else:
+        out.append(line)
+if n==0: sys.exit("tag 줄을 못 찾음: "+f)
+p.write_text("\n".join(out), encoding="utf-8")
+print("    %d곳 갱신 -> %s" % (n,t))' "${VALUES_FILE}" "${IMAGE_TAG}"
 
                             git config user.email 'jenkins@reverdi.local'
                             git config user.name  'jenkins-bot'
