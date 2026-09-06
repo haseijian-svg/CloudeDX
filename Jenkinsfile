@@ -42,6 +42,21 @@ spec:
       operator: Equal
       value: batch
       effect: NoSchedule
+  # ---------------------------------------------------------------------
+  # 🔴 requests 는 "예약", limits 는 "상한" 이다 (2026-09-06 조정)
+  #
+  #   requests 합계가 노드의 할당 가능량보다 크면 파드가 영원히 Pending 이다.
+  #     "0/6 nodes are available: 2 Insufficient cpu, 2 Insufficient memory"
+  #
+  #   로컬 node4 는 4 vCPU · 8GB 라 넉넉히 잡아뒀는데,
+  #   AWS t3.medium 은 2 vCPU · 할당 가능 3.3GB 다. 그대로 쓰면 안 들어간다.
+  #
+  #   그래서 requests 만 낮추고 limits 는 그대로 둔다.
+  #   → 스케줄링은 통과하고, 실제로 필요하면 limits 까지 쓴다.
+  #
+  #     requests 합계  2.0 vCPU / 4.2Gi  →  1.1 vCPU / 2.3Gi
+  #     limits         변경 없음
+  # ---------------------------------------------------------------------
   containers:
     # --- 파이썬 lint / test ---------------------------------------------
     - name: python
@@ -49,7 +64,8 @@ spec:
       command: ["sleep"]
       args: ["99d"]
       resources:
-        requests: { cpu: "500m", memory: "1Gi" }
+        # requests 를 낮춰 스케줄링을 통과시킨다. limits 는 그대로.
+        requests: { cpu: "300m", memory: "512Mi" }
         limits:   { cpu: "2",    memory: "2Gi" }
 
     # --- 테스트용 Postgres (사이드카) ------------------------------------
@@ -75,8 +91,10 @@ spec:
       securityContext:
         privileged: true
       resources:
-        requests: { cpu: "1", memory: "2Gi" }
-        # 크롤러 이미지가 2.7GB 라 여유를 준다
+        # 🔴 requests 를 절반으로. 빌드가 실제로 2Gi 를 상시 쓰지는 않는다.
+        #    피크에는 limits(4Gi)까지 쓸 수 있다.
+        requests: { cpu: "500m", memory: "1Gi" }
+        # 크롤러 이미지가 2.7GB 라 상한은 여유를 준다
         limits:   { cpu: "2", memory: "4Gi" }
 
     # --- helm / git ------------------------------------------------------
@@ -89,7 +107,7 @@ spec:
       command: ["sleep"]
       args: ["99d"]
       resources:
-        requests: { cpu: "200m", memory: "512Mi" }
+        requests: { cpu: "100m", memory: "256Mi" }
 '''
 
 pipeline {
