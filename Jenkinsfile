@@ -312,33 +312,40 @@ pipeline {
                             git clone https://${GIT_USER}:${GIT_TOKEN}@${GITOPS_REPO} gitops-update
 
                             cd gitops-update/${CHART_PATH}
-
-                            # 🔴 sed 대신 python (2026-09-06 실패 → 수정)
+                            # 🔴 sed 를 python 으로 바꿨다 (2026-09-06 실패 → 수정)
                             #
-                            #    sed -i "s|^  tag: .*|  tag: ...|" 가 동작하지 않았다.
-                            #    Groovy 문자열을 지나며 따옴표가 벗겨져, 셸에서
-                            #    공백으로 쪼개지고 "s|^" 만 스크립트가 됐다.
-                            #
-                            #    더 나빴던 건 종료 코드가 0 이었다는 점이다.
-                            #    set -e 도 안 걸리고, git diff --quiet 이
+                            #  [1차 문제] sed 가 조용히 실패했다
+                            #    sed -i "s|^  tag: .*|  tag: ...|" 를 썼는데
+                            #    Groovy 문자열을 지나며 따옴표가 벗겨져
+                            #    셸에서 공백으로 쪼개졌다. "s|^" 만 스크립트가 되어
+                            #    아무것도 안 바꿨는데 종료 코드는 0 이었다.
+                            #    set -e 에 안 걸리고, git diff --quiet 이
                             #    "변경 없음"으로 판정해 조용히 넘어갔다.
-                            #    로그에는 "태그 변경 없음"만 찍혔다.
                             #
-                            #    python 은 정규식 치환 대신 문자열을 조립해
-                            #    이스케이프 문제를 없앴고, 못 찾으면 명시적으로 실패한다.
-                            python3 -c 'import pathlib,re,sys
+                            #  [2차 문제] python 으로 바꿨더니 Groovy 파싱이 깨졌다
+                            #    Groovy 의 삼중따옴표 문자열도 백슬래시를 이스케이프로 읽는다.
+                            #      unexpected char: 0x5C  @ line ..., column ...
+                            #    정규식의 백슬래시-s 가 유효한 Groovy 이스케이프가 아니다.
+                            #
+                            #  [해결] 백슬래시를 하나도 쓰지 않는다.
+                            #    정규식 대신 문자열 함수로 처리하고,
+                            #    따옴표와 줄바꿈은 chr(34) · chr(10) 으로 만든다.
+                            python3 -c 'import pathlib,sys
 f,t=sys.argv[1],sys.argv[2]
 p=pathlib.Path(f); s=p.read_text(encoding="utf-8")
+q=chr(34); nl=chr(10)
 out=[]; n=0
-for line in s.split("\n"):
-    m=re.match(r"^(\s*)tag: ", line)
-    if m:
-        out.append(m.group(1)+"tag: \"%s\"" % t); n+=1
+for line in s.splitlines():
+    st=line.lstrip()
+    if st.startswith("tag:"):
+        pad=line[:len(line)-len(st)]
+        out.append(pad+"tag: "+q+t+q); n+=1
     else:
         out.append(line)
-if n==0: sys.exit("tag 줄을 못 찾음: "+f)
-p.write_text("\n".join(out), encoding="utf-8")
-print("    %d곳 갱신 -> %s" % (n,t))' "${VALUES_FILE}" "${IMAGE_TAG}"
+if n==0:
+    sys.exit("tag 줄을 못 찾음: "+f)
+p.write_text(nl.join(out)+nl, encoding="utf-8")
+print("    "+str(n)+"곳 갱신 -> "+t)' "${VALUES_FILE}" "${IMAGE_TAG}"
 
                             git config user.email 'jenkins@reverdi.local'
                             git config user.name  'jenkins-bot'
