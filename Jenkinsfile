@@ -65,7 +65,12 @@ spec:
       args: ["99d"]
       resources:
         # requests 를 낮춰 스케줄링을 통과시킨다. limits 는 그대로.
-        requests: { cpu: "300m", memory: "512Mi" }
+        #
+        # ⚠️ 너무 낮추면 asyncpg 테스트가 이벤트 루프 오류로 실패한다.
+        #    CPU 가 모자라면 커넥션 정리가 늦어져 다음 테스트가 그걸 물고 간다:
+        #      "got Future ... attached to a different loop"
+        #    GitHub Actions(2코어)에서는 안 나던 것이 300m 에서 났다.
+        requests: { cpu: "800m", memory: "1Gi" }
         limits:   { cpu: "2",    memory: "2Gi" }
 
     # --- 테스트용 Postgres (사이드카) ------------------------------------
@@ -126,6 +131,10 @@ pipeline {
         choice(name: 'VALUES_FILE',
                choices: ['values-aws.yaml', 'values-vagrant.yaml'],
                description: '어느 환경의 값 파일에 태그를 커밋할지')
+        // 🔴 임시 우회용. 기본은 비워둔다 — 테스트를 건너뛰는 건 예외 상황이다.
+        //    예: app/tests/test_ownership.py
+        string(name: 'DESELECT_TESTS', defaultValue: '',
+               description: '건너뛸 테스트 경로 (비우면 전부 실행). 임시 우회용이며 상시로 쓰지 말 것')
     }
 
     options {
@@ -148,6 +157,7 @@ pipeline {
         CHART_PATH  = 'charts/reverdi'
         VALUES_FILE = "${params.VALUES_FILE}"
         AWS_REGION  = 'ap-northeast-2'
+        DESELECT_TESTS = "${params.DESELECT_TESTS}"
     }
 
     stages {
@@ -205,7 +215,16 @@ pipeline {
                         uv run alembic upgrade head
                         # 모델을 고치고 마이그레이션을 안 만든 경우가 여기서 걸린다.
                         uv run alembic check
-                        uv run pytest
+
+                        # 🔴 DESELECT_TESTS 가 비어 있으면 전부 실행한다(기본).
+                        #    값을 주면 그 경로만 건너뛴다 — 앱 쪽 문제를 조사하는 동안
+                        #    파이프라인 나머지를 확인하려는 임시 우회다.
+                        if [ -n "${DESELECT_TESTS}" ]; then
+                          echo "⚠️  건너뛰는 테스트: ${DESELECT_TESTS}"
+                          uv run pytest --deselect "${DESELECT_TESTS}"
+                        else
+                          uv run pytest
+                        fi
                     '''
                 }
             }
