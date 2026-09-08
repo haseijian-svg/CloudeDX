@@ -153,7 +153,7 @@ pipeline {
         //    (Jenkins 관리 → 잡 → 이 빌드는 매개변수가 있습니다)
         REGISTRY    = "${params.REGISTRY}"
         // 🔴 배포 저장소. 앱 소스(CloudeDX)와 다른 곳이어야 한다.
-        GITOPS_REPO = 'github.com/jpnjb0918-glitch/reverdi.git'
+        GITOPS_REPO = 'github.com/haseijian-svg/reverdi.git'
         CHART_PATH  = 'charts/reverdi'
         VALUES_FILE = "${params.VALUES_FILE}"
         AWS_REGION  = 'ap-northeast-2'
